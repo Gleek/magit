@@ -3766,7 +3766,8 @@ actually a `diff' but a `diffstat' section."
 
 (cl-defmethod magit-section--refine ((section magit-hunk-section))
   (unless (magit--meta-hunk-p section)
-    (when (eq magit-diff-fontify-hunk t)
+    (when (and (eq magit-diff-fontify-hunk t)
+               (eq section (magit-current-section)))
       (magit-diff--update-hunk-syntax section))
     (when (eq magit-diff-refine-hunk t)
       (magit-diff-update-hunk-refinement section))))
@@ -3802,6 +3803,20 @@ actually a `diff' but a `diffstat' section."
 
 ;;;; Syntax
 
+(defvar-local magit-diff--syntax-file-cache nil
+  "Alist mapping (rev . file) to buffer for hunk syntax fontification.
+Persists across navigations; cleared on buffer refresh.")
+
+(defvar-local magit-diff--syntax-sides-cache nil
+  "Alist mapping file sections to old/new sides for hunk syntax fontification.
+Persists across navigations; cleared on buffer refresh.")
+
+(defun magit-diff--clear-syntax-file-cache ()
+  (setq magit-diff--syntax-file-cache nil)
+  (setq magit-diff--syntax-sides-cache nil))
+
+(add-hook 'magit-pre-refresh-hook #'magit-diff--clear-syntax-file-cache)
+
 (defun magit-diff--update-hunk-syntax (&optional hunk)
   (if hunk
       (pcase-let (((eieio fontified content end) hunk))
@@ -3810,7 +3825,7 @@ actually a `diff' but a `diffstat' section."
           (save-excursion
             (goto-char content)
             (pcase-let*
-                ((`(,old ,new) (magit-diff-visit--sides))
+                ((`(,old ,new) (magit-diff--get-hunk-sides hunk))
                  (old (apply #'magit-diff--get-hunk-syntax hunk 'old old))
                  (new (apply #'magit-diff--get-hunk-syntax hunk 'new new)))
               (while (< (point) end)
@@ -3831,12 +3846,31 @@ actually a `diff' but a `diffstat' section."
         (dolist (child (oref section children))
           (update child))))))
 
+(defun magit-diff--get-hunk-sides (hunk)
+  (let ((key (oref hunk parent)))
+    (or (alist-get key magit-diff--syntax-sides-cache nil nil #'eq)
+        (let ((sides (save-excursion
+                       (goto-char (oref hunk content))
+                       (magit-diff-visit--sides))))
+          (setf (alist-get key magit-diff--syntax-sides-cache nil nil #'eq)
+                sides)
+          sides))))
+
 (defun magit-diff--get-hunk-syntax (hunk side rev file)
   (let ((args (magit-diff--get-hunk-text hunk (eq side 'old))))
     (unless (listp (car (cadr args))) ; TODO Support unmerged changes.
-      (with-current-buffer (magit-find-file-noselect rev file t t)
-        (save-excursion
-          (apply #'diff-syntax-fontify-props nil args))))))
+      (let* ((key (cons rev file))
+             (buf (or (and-let* ((b (alist-get key magit-diff--syntax-file-cache
+                                               nil nil #'equal)))
+                        (and (buffer-live-p b) b))
+                      (let ((b (magit-find-file-noselect rev file t t)))
+                        (setf (alist-get key magit-diff--syntax-file-cache
+                                         nil nil #'equal)
+                              b)
+                        b))))
+        (with-current-buffer buf
+          (save-excursion
+            (apply #'diff-syntax-fontify-props nil args)))))))
 
 (defun magit-diff--get-hunk-text (hunk from)
   (pcase-let* (((eieio start end from-range to-range) hunk)
